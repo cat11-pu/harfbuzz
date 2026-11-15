@@ -4,6 +4,9 @@ Overview of changes leading to REPLACEME
   avoiding the overhead of setting up default font functions first.
 - Avoid loading a second FreeType face in `hb_ft_font_create()` when FreeType
   is the default font backend.
+- Harden malformed-font handling during shaping: reject out-of-range table
+  directory entries in `hb_face_create_or_fail()`, clamp API-provided glyph
+  counts to the 24-bit limit, and guard out-of-range LigatureSet indices.
 
 - New API:
   +hb_font_create_without_funcs_or_fail()
@@ -4812,4 +4815,3 @@ Summary of API changes follows.
     hb_version()
     hb_version_string()
     hb_version_check()
-

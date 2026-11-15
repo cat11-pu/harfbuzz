@@ -58,6 +58,13 @@
 #define HB_MAX_CONTEXT_LENGTH 64
 #endif
 
+/* Widest glyph-count field in the OpenType formats we support is the
+ * 24-bit MAXP.numGlyphs.  Keep API-provided counts within that range so
+ * that numGlyphs + 1 and set allocations cannot wrap. */
+#ifndef HB_MAX_GLYPHS
+#define HB_MAX_GLYPHS 0xFFFFFFu
+#endif
+
 #ifndef HB_MAX_SYLLABLE_LENGTH
 #define HB_MAX_SYLLABLE_LENGTH 64
 #endif

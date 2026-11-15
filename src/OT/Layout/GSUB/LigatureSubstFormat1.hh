@@ -127,6 +127,7 @@ struct LigatureSubstFormat1_2
   {
     unsigned int index = (this+coverage).get_coverage (c->glyphs[0]);
     if (likely (index == NOT_COVERED)) return false;
+    if (unlikely (index >= ligatureSet.len)) return false;
 
     const auto &lig_set = this+ligatureSet[index];
     return lig_set.would_apply (c);
@@ -167,6 +168,7 @@ struct LigatureSubstFormat1_2
     unsigned int index = (this+coverage).get_coverage (buffer->cur().codepoint);
 #endif
     if (index == NOT_COVERED) return_trace (false);
+    if (unlikely (index >= ligatureSet.len)) return_trace (false);
 
     const auto &lig_set = this+ligatureSet[index];
     return_trace (lig_set.apply (c, seconds));

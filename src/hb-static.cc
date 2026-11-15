@@ -78,7 +78,7 @@ load_num_glyphs_from_maxp (const hb_face_t *face)
 unsigned int
 hb_face_t::load_num_glyphs () const
 {
-  num_glyphs = load_num_glyphs_from_maxp (this);
+  num_glyphs = hb_min (load_num_glyphs_from_maxp (this), HB_MAX_GLYPHS);
   return num_glyphs;
 }
 

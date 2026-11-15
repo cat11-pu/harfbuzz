@@ -293,6 +293,26 @@ hb_face_create_or_fail (hb_blob_t    *blob,
   if ((index & 0xFFFFu) >= num_faces)
     return nullptr;
 
+  unsigned int length;
+  const char *data = hb_blob_get_data (blob, &length);
+  if (unlikely (!data))
+    return nullptr;
+
+  const OT::OpenTypeFontFile &ot_file = *blob->as<OT::OpenTypeFontFile> ();
+  unsigned int base_offset;
+  const OT::OpenTypeFontFace &ot_face = ot_file.get_face (index & 0xFFFFu, &base_offset);
+  if (unlikely (base_offset > length))
+    return nullptr;
+
+  for (unsigned int i = 0; i < ot_face.get_table_count (); i++)
+  {
+    const OT::OpenTypeTable &table = ot_face.get_table (i);
+    uint64_t offset = (uint64_t) base_offset + (unsigned int) table.offset;
+    uint64_t end = offset + (unsigned int) table.length;
+    if (unlikely (offset > length || end > length))
+      return nullptr;
+  }
+
   hb_face_t *face = hb_face_create (blob, index);
   if (hb_object_is_immutable (face))
     return nullptr;
@@ -879,7 +899,7 @@ hb_face_set_glyph_count (hb_face_t    *face,
   if (hb_object_is_immutable (face))
     return;
 
-  face->num_glyphs = glyph_count;
+  face->num_glyphs = hb_min (glyph_count, HB_MAX_GLYPHS);
 }
 
 /**
