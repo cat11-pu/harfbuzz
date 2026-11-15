@@ -37,6 +37,10 @@ struct hb_shape_plan_key_t
 
   const hb_feature_t      *user_features;
   unsigned int             num_user_features;
+  const int               *coords;
+  unsigned int             num_coords;
+  bool                     owns_coords;
+  bool                     ot_initialized;
 
 #ifndef HB_NO_OT_SHAPE
   hb_ot_shape_plan_key_t   ot;
@@ -52,12 +56,16 @@ struct hb_shape_plan_key_t
 			 unsigned int                   num_user_features,
 			 const int                     *coords,
 			 unsigned int                   num_coords,
-			 const char * const            *shaper_list);
+			 const char * const            *shaper_list,
+			 bool                           init_ot = true);
 
   HB_INTERNAL void fini ()
   {
     hb_free ((void *) user_features);
     user_features = nullptr;
+    if (owns_coords)
+      hb_free ((void *) coords);
+    coords = nullptr;
 #ifndef HB_NO_OT_SHAPE
     ot.fini ();
 #endif
@@ -65,7 +73,19 @@ struct hb_shape_plan_key_t
 
   HB_INTERNAL bool user_features_match (const hb_shape_plan_key_t *other);
 
-  HB_INTERNAL bool equal (const hb_shape_plan_key_t *other);
+  HB_INTERNAL bool equal (hb_shape_plan_key_t *other, hb_face_t *face);
+
+  HB_INTERNAL bool init_ot (hb_face_t *face)
+  {
+#ifndef HB_NO_OT_SHAPE
+    if (ot_initialized)
+      return true;
+    if (unlikely (!ot.init (face, coords, num_coords)))
+      return false;
+    ot_initialized = true;
+#endif
+    return true;
+  }
 };
 
 struct hb_shape_plan_t

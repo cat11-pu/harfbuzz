@@ -79,15 +79,23 @@ hb_shape_plan_key_t::init (bool                           copy,
 			   unsigned int                   num_user_features,
 			   const int                     *coords,
 			   unsigned int                   num_coords,
-			   const char * const            *shaper_list)
+			   const char * const            *shaper_list,
+			   bool                           init_ot)
 {
+  int *coords_copy = nullptr;
   hb_feature_t *features = nullptr;
   if (copy && num_user_features && !(features = (hb_feature_t *) hb_calloc (num_user_features, sizeof (hb_feature_t))))
+    goto bail;
+  if (copy && num_coords && !(coords_copy = (int *) hb_malloc (num_coords * sizeof (int))))
     goto bail;
 
   this->props = *props;
   this->num_user_features = num_user_features;
   this->user_features = copy ? features : user_features;
+  this->coords = copy ? coords_copy : coords;
+  this->num_coords = num_coords;
+  this->owns_coords = copy && num_coords;
+  this->ot_initialized = false;
   if (copy && num_user_features)
   {
     hb_memcpy (features, user_features, num_user_features * sizeof (hb_feature_t));
@@ -100,11 +108,14 @@ hb_shape_plan_key_t::init (bool                           copy,
 	features[0].end   = 2;
     }
   }
+  if (copy && num_coords)
+    hb_memcpy (coords_copy, coords, num_coords * sizeof (int));
   this->shaper_func = nullptr;
   this->shaper_name = nullptr;
 #ifndef HB_NO_OT_SHAPE
-  if (unlikely (!this->ot.init (face, coords, num_coords)))
+  if (init_ot && unlikely (!this->ot.init (face, coords, num_coords)))
     goto bail;
+  this->ot_initialized = init_ot;
 #endif
 
   /*
@@ -152,6 +163,10 @@ bail:
   this->ot.fini ();
 #endif
   ::hb_free (features);
+  ::hb_free (coords_copy);
+  this->coords = nullptr;
+  this->num_coords = 0;
+  this->owns_coords = false;
   return false;
 }
 
@@ -174,14 +189,40 @@ hb_shape_plan_key_t::user_features_match (const hb_shape_plan_key_t *other)
 }
 
 bool
-hb_shape_plan_key_t::equal (const hb_shape_plan_key_t *other)
+hb_shape_plan_key_t::equal (hb_shape_plan_key_t *other, hb_face_t *face)
 {
-  return hb_segment_properties_equal (&this->props, &other->props) &&
-	 this->user_features_match (other) &&
+  if (!hb_segment_properties_equal (&this->props, &other->props) ||
+      !this->user_features_match (other) ||
+      this->shaper_func != other->shaper_func)
+    return false;
+
+  bool coords_equal = true;
+  unsigned int max_coords = hb_max (this->num_coords, other->num_coords);
+  for (unsigned int i = 0; i < max_coords; i++)
+  {
+    int this_coord = i < this->num_coords ? this->coords[i] : 0;
+    int other_coord = i < other->num_coords ? other->coords[i] : 0;
+    if (this_coord != other_coord)
+    {
+      coords_equal = false;
+      break;
+    }
+  }
+  if (coords_equal)
+    return true;
+
 #ifndef HB_NO_OT_SHAPE
-	 this->ot.equal (&other->ot) &&
+  /* Different coordinates may still select the same FeatureVariations
+   * state.  Only derive it when the cheap coordinate comparison misses. */
+  if (other->ot_initialized)
+    return this->ot.equal (&other->ot);
+
+  if (unlikely (!other->init_ot (face)))
+    return false;
+  return this->ot.equal (&other->ot);
+#else
+  return true;
 #endif
-	 this->shaper_func == other->shaper_func;
 }
 
 
@@ -550,7 +591,8 @@ hb_shape_plan_create_cached2 (hb_face_t                     *face,
 		  shaper_list);
 
 retry:
-  hb_face_t::plan_node_t *cached_plan_nodes = face->shape_plans;
+  unsigned int bucket = (unsigned int) props->script & (hb_face_t::shape_plan_bucket_count - 1);
+  hb_face_t::plan_node_t *cached_plan_nodes = face->shape_plans[bucket];
 
   bool dont_cache = !hb_object_is_valid (face);
 
@@ -564,11 +606,12 @@ retry:
 		   num_user_features,
 		   coords,
 		   num_coords,
-		   shaper_list))
+		   shaper_list,
+		   false))
       return hb_shape_plan_get_empty ();
 
     for (hb_face_t::plan_node_t *node = cached_plan_nodes; node; node = node->next)
-      if (node->shape_plan->key.equal (&key))
+      if (node->shape_plan->key.equal (&key, face))
       {
 	DEBUG_MSG_FUNC (SHAPE_PLAN, node->shape_plan, "fulfilled from cache");
 	return hb_shape_plan_reference (node->shape_plan);
@@ -590,7 +633,7 @@ retry:
   node->shape_plan = shape_plan;
   node->next = cached_plan_nodes;
 
-  if (unlikely (!face->shape_plans.cmpexch (cached_plan_nodes, node)))
+  if (unlikely (!face->shape_plans[bucket].cmpexch (cached_plan_nodes, node)))
   {
     hb_shape_plan_destroy (shape_plan);
     hb_free (node);

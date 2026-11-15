@@ -70,7 +70,8 @@ struct hb_face_t
     plan_node_t *next;
   };
 #ifndef HB_NO_SHAPER
-  hb_atomic_t<plan_node_t *> shape_plans;
+  static constexpr unsigned shape_plan_bucket_count = 16;
+  hb_atomic_t<plan_node_t *> shape_plans[shape_plan_bucket_count];
 #endif
 
   hb_blob_t *reference_table (hb_tag_t tag) const
