@@ -913,6 +913,11 @@ hb_set_t
 hb_shape
 hb_shape_full
 hb_shape_list_shapers
+hb_shape_incremental_create
+hb_shape_incremental_destroy
+hb_shape_incremental_append_utf8
+hb_shape_incremental_get_buffer
+hb_shape_incremental_t
 <SUBSECTION Private>
 hb_shape_justify
 </SUBSECTION>

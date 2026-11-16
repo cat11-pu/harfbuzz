@@ -33,6 +33,7 @@
 #include "hb-buffer.hh"
 #include "hb-font.hh"
 #include "hb-machinery.hh"
+#include "hb-vector.hh"
 
 
 #ifndef HB_NO_SHAPER
@@ -188,6 +189,448 @@ hb_shape (hb_font_t           *font,
 	  unsigned int         num_features)
 {
   hb_shape_full (font, buffer, features, num_features, nullptr);
+}
+
+
+struct hb_shape_incremental_t
+{
+  hb_object_header_t header;
+
+  hb_font_t *font;
+  hb_buffer_t *text;
+  hb_buffer_t *glyphs;
+  hb_buffer_t *tail;
+
+  hb_segment_properties_t props;
+  hb_segment_properties_t current_props;
+  hb_vector_t<hb_feature_t> features;
+
+  unsigned int text_bytes;
+  unsigned int text_start;
+};
+
+static bool
+hb_shape_incremental_utf8_valid (const char *text, unsigned int text_length)
+{
+  const uint8_t *p = (const uint8_t *) text;
+  const uint8_t *end = p + text_length;
+
+  while (p < end)
+  {
+    uint8_t c = *p++;
+    hb_codepoint_t u;
+    unsigned int continuation;
+
+    if (c < 0x80u)
+      continue;
+
+    if (hb_in_range<uint8_t> (c, 0xC2u, 0xDFu))
+    {
+      u = c & 0x1Fu;
+      continuation = 1;
+    }
+    else if (hb_in_range<uint8_t> (c, 0xE0u, 0xEFu))
+    {
+      u = c & 0x0Fu;
+      continuation = 2;
+    }
+    else if (hb_in_range<uint8_t> (c, 0xF0u, 0xF4u))
+    {
+      u = c & 0x07u;
+      continuation = 3;
+    }
+    else
+      return false;
+
+    if ((unsigned int) (end - p) < continuation)
+      return false;
+
+    for (unsigned int i = 0; i < continuation; i++)
+    {
+      if ((p[i] & 0xC0u) != 0x80u)
+	return false;
+      u = (u << 6) | (p[i] & 0x3Fu);
+    }
+    p += continuation;
+
+    if ((continuation == 2 && (u < 0x800u || hb_in_range<hb_codepoint_t> (u, 0xD800u, 0xDFFFu))) ||
+	(continuation == 3 && (u < 0x10000u || u > 0x10FFFFu)))
+      return false;
+  }
+
+  return true;
+}
+
+static unsigned int
+hb_shape_incremental_text_index (const hb_buffer_t *text, unsigned int cluster)
+{
+  unsigned int lo = 0, hi = text->len;
+
+  while (lo < hi)
+  {
+    unsigned int mid = (lo + hi) / 2;
+    if (text->info[mid].cluster < cluster)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+
+  return lo;
+}
+
+static unsigned int
+hb_shape_incremental_next_safe (hb_buffer_t *tail,
+				hb_buffer_t *text,
+				unsigned int text_start)
+{
+  if (!tail->len)
+    return text_start;
+
+  unsigned int candidate = UINT_MAX;
+  bool forward = HB_DIRECTION_IS_FORWARD (tail->props.direction);
+
+  if (forward)
+  {
+    unsigned int i = tail->len;
+    while (i)
+    {
+      unsigned int cluster = tail->info[i - 1].cluster;
+      unsigned int start = i - 1;
+      while (start && tail->info[start - 1].cluster == cluster)
+	start--;
+
+      if (!(tail->info[start].mask & HB_GLYPH_FLAG_UNSAFE_TO_BREAK))
+      {
+	candidate = cluster;
+	break;
+      }
+      i = start;
+    }
+  }
+  else
+  {
+    unsigned int i = 0;
+    while (i < tail->len)
+    {
+      unsigned int cluster = tail->info[i].cluster;
+      unsigned int end = i + 1;
+      while (end < tail->len && tail->info[end].cluster == cluster)
+	end++;
+
+      if (!(tail->info[i].mask & HB_GLYPH_FLAG_UNSAFE_TO_BREAK))
+      {
+	candidate = cluster;
+	break;
+      }
+      i = end;
+    }
+  }
+
+  if (candidate == UINT_MAX)
+    return text_start;
+
+  unsigned int index = hb_shape_incremental_text_index (text, candidate);
+  if (index < text_start ||
+      index >= text->len ||
+      text->info[index].cluster != candidate)
+    return text_start;
+
+  return index;
+}
+
+/**
+ * hb_shape_incremental_create:
+ * @font: an #hb_font_t to use for shaping
+ * @props: (nullable): segment properties for the accumulated text
+ * @features: (array length=num_features) (nullable): an array of user
+ *    specified #hb_feature_t or `NULL`
+ * @num_features: the length of @features array
+ *
+ * Creates an incremental shaping object.
+ *
+ * Text is appended with hb_shape_incremental_append_utf8().  The object
+ * retains the accumulated Unicode text and the shaped glyph result.  Its
+ * output is equivalent to shaping the whole accumulated text with
+ * hb_shape(), using the same font, features, and segment properties.
+ *
+ * Unset fields in @props are inferred from the first appended text.
+ *
+ * Return value: (transfer full) (nullable): a newly created incremental
+ *    shaping object, or `NULL` if allocation failed.
+ *
+ * Since: REPLACEME
+ **/
+hb_shape_incremental_t *
+hb_shape_incremental_create (hb_font_t                      *font,
+			     const hb_segment_properties_t  *props,
+			     const hb_feature_t             *features,
+			     unsigned int                    num_features)
+{
+  if (unlikely (!font || (num_features && !features)))
+    return nullptr;
+
+  hb_shape_incremental_t *incremental =
+    hb_object_create<hb_shape_incremental_t> ();
+  if (unlikely (!incremental))
+    return nullptr;
+
+  incremental->font = hb_font_reference (font);
+  incremental->text = hb_buffer_create ();
+  incremental->glyphs = hb_buffer_create ();
+  incremental->tail = hb_buffer_create ();
+  incremental->props = HB_SEGMENT_PROPERTIES_DEFAULT;
+  if (props)
+    incremental->props = *props;
+  incremental->current_props = incremental->props;
+
+  if (unlikely (!incremental->features.resize (num_features)) ||
+      !incremental->text ||
+      !incremental->glyphs ||
+      !incremental->tail ||
+      !hb_buffer_allocation_successful (incremental->text) ||
+      !hb_buffer_allocation_successful (incremental->glyphs) ||
+      !hb_buffer_allocation_successful (incremental->tail))
+  {
+    hb_shape_incremental_destroy (incremental);
+    return nullptr;
+  }
+
+  if (num_features)
+    hb_memcpy (incremental->features.arrayZ, features,
+	       num_features * sizeof (features[0]));
+
+  return incremental;
+}
+
+/**
+ * hb_shape_incremental_destroy:
+ * @incremental: an #hb_shape_incremental_t
+ *
+ * Destroys an incremental shaping object.
+ *
+ * Since: REPLACEME
+ **/
+void
+hb_shape_incremental_destroy (hb_shape_incremental_t *incremental)
+{
+  if (!hb_object_destroy (incremental))
+    return;
+
+  hb_buffer_destroy (incremental->text);
+  hb_buffer_destroy (incremental->glyphs);
+  hb_buffer_destroy (incremental->tail);
+  hb_font_destroy (incremental->font);
+  hb_free (incremental);
+}
+
+/**
+ * hb_shape_incremental_append_utf8:
+ * @incremental: an #hb_shape_incremental_t
+ * @text: (array length=text_length) (element-type uint8_t): UTF-8 text to append
+ * @text_length: length of @text in bytes, or -1 if `NUL`-terminated
+ * @first_changed_cluster: (out) (optional): first reshaped cluster
+ * @first_changed_glyph: (out) (optional): first glyph that may have changed
+ *
+ * Appends UTF-8 text to the accumulated input and updates the shaped
+ * result.  @text must contain complete, well-formed UTF-8 sequences.
+ *
+ * Only the cluster range that can be affected by the new suffix is
+ * re-shaped.  Glyphs before @first_changed_cluster are unchanged.  Cluster
+ * values are UTF-8 byte offsets in the accumulated text, so appending does
+ * not renumber existing clusters.
+ *
+ * @first_changed_glyph is the first index in the buffer returned by
+ * hb_shape_incremental_get_buffer() that may have changed.  For backward
+ * directions, changed glyphs are at the beginning of the output.
+ *
+ * Return value: `true` if successful, `false` if @text is not valid UTF-8
+ *    or allocation failed.
+ *
+ * Since: REPLACEME
+ **/
+hb_bool_t
+hb_shape_incremental_append_utf8 (hb_shape_incremental_t *incremental,
+				  const char             *text,
+				  int                     text_length,
+				  unsigned int           *first_changed_cluster,
+				  unsigned int           *first_changed_glyph)
+{
+  if (first_changed_cluster)
+    *first_changed_cluster = UINT_MAX;
+  if (first_changed_glyph)
+    *first_changed_glyph = UINT_MAX;
+
+  if (unlikely (!incremental))
+    return false;
+
+  if (text_length < 0)
+  {
+    size_t length = text ? strlen (text) : 0;
+    if (unlikely (length > INT_MAX))
+      return false;
+    text_length = (int) length;
+  }
+
+  if (!text_length)
+  {
+    if (first_changed_cluster)
+      *first_changed_cluster = incremental->text_bytes;
+    if (first_changed_glyph)
+      *first_changed_glyph = incremental->glyphs->len;
+    return true;
+  }
+
+  if (unlikely (!text ||
+		!hb_shape_incremental_utf8_valid (text, text_length)))
+    return false;
+
+  unsigned int new_text_bytes;
+  unsigned int new_text_capacity;
+  if (unlikely (hb_unsigned_add_overflows (incremental->text_bytes,
+					   (unsigned int) text_length,
+					   &new_text_bytes) ||
+		hb_unsigned_add_overflows (incremental->text->len,
+					   (unsigned int) text_length,
+					   &new_text_capacity) ||
+		!hb_buffer_pre_allocate (incremental->text, new_text_capacity)))
+    return false;
+
+  unsigned int old_text_len = incremental->text->len;
+  unsigned int cluster_base = incremental->text_bytes;
+  hb_buffer_add_utf8 (incremental->text, text, text_length, 0, -1);
+  if (unlikely (incremental->text->len < old_text_len ||
+		!incremental->text->successful))
+    return false;
+
+  for (unsigned int i = old_text_len; i < incremental->text->len; i++)
+    incremental->text->info[i].cluster += cluster_base;
+  incremental->text_bytes = new_text_bytes;
+
+  hb_segment_properties_t old_props = incremental->current_props;
+  hb_buffer_set_segment_properties (incremental->text, &incremental->props);
+  hb_buffer_guess_segment_properties (incremental->text);
+  hb_buffer_get_segment_properties (incremental->text,
+				    &incremental->current_props);
+
+  unsigned int text_start = incremental->text_start;
+  if (old_props.direction != incremental->current_props.direction ||
+      old_props.script != incremental->current_props.script ||
+      old_props.language != incremental->current_props.language)
+    text_start = 0;
+  if (unlikely (text_start > incremental->text->len))
+    return false;
+
+  hb_buffer_clear_contents (incremental->tail);
+  hb_buffer_append (incremental->tail, incremental->text, text_start, -1);
+  hb_buffer_set_segment_properties (incremental->tail,
+				    &incremental->current_props);
+  hb_buffer_set_cluster_level (incremental->tail,
+			       hb_buffer_get_cluster_level (incremental->text));
+
+  hb_buffer_set_flags (incremental->tail, HB_BUFFER_FLAG_DEFAULT);
+
+  if (unlikely (!hb_shape_full (incremental->font,
+				incremental->tail,
+				incremental->features.arrayZ,
+				incremental->features.length,
+				nullptr) ||
+		!incremental->tail->successful))
+    return false;
+
+  unsigned int tail_len = incremental->tail->len;
+  hb_glyph_info_t *tail_info = incremental->tail->info;
+  hb_glyph_position_t *tail_pos = incremental->tail->pos;
+
+  unsigned int new_text_start =
+    hb_shape_incremental_next_safe (incremental->tail,
+				    incremental->text,
+				    text_start);
+
+  unsigned int cluster = text_start < incremental->text->len ?
+			 incremental->text->info[text_start].cluster :
+			 incremental->text_bytes;
+
+  hb_buffer_t *glyphs = incremental->glyphs;
+  hb_buffer_get_glyph_positions (glyphs, nullptr);
+  if (unlikely (!glyphs->successful))
+    return false;
+
+  unsigned int old_len = glyphs->len;
+  unsigned int changed_glyph;
+  bool forward = HB_DIRECTION_IS_FORWARD (incremental->current_props.direction);
+
+  if (forward)
+  {
+    unsigned int prefix = 0;
+    while (prefix < old_len && glyphs->info[prefix].cluster < cluster)
+      prefix++;
+
+    changed_glyph = prefix;
+    glyphs->len = prefix;
+    hb_buffer_append (glyphs, incremental->tail, 0, -1);
+    if (unlikely (!glyphs->successful))
+      return false;
+  }
+  else
+  {
+    unsigned int prefix_start = old_len;
+    while (prefix_start && glyphs->info[prefix_start - 1].cluster < cluster)
+      prefix_start--;
+
+    unsigned int prefix = old_len - prefix_start;
+    unsigned int total;
+    if (unlikely (hb_unsigned_add_overflows (tail_len, prefix, &total) ||
+		  !glyphs->ensure (total)))
+      return false;
+
+    hb_glyph_info_t *info = glyphs->info;
+    hb_glyph_position_t *pos = glyphs->pos;
+    if (prefix)
+      memmove (info + tail_len, info + prefix_start,
+	       prefix * sizeof (info[0]));
+    if (prefix)
+      memmove (pos + tail_len, pos + prefix_start,
+	       prefix * sizeof (pos[0]));
+    if (tail_len)
+      hb_memcpy (info, tail_info, tail_len * sizeof (info[0]));
+    if (tail_len)
+      hb_memcpy (pos, tail_pos, tail_len * sizeof (pos[0]));
+
+    glyphs->len = total;
+    glyphs->content_type = HB_BUFFER_CONTENT_TYPE_GLYPHS;
+    glyphs->have_positions = true;
+    changed_glyph = 0;
+  }
+
+  glyphs->props = incremental->current_props;
+  incremental->text_start = new_text_start;
+
+  if (first_changed_cluster)
+    *first_changed_cluster = cluster;
+  if (first_changed_glyph)
+    *first_changed_glyph = changed_glyph;
+
+  return glyphs->successful;
+}
+
+/**
+ * hb_shape_incremental_get_buffer:
+ * @incremental: an #hb_shape_incremental_t
+ *
+ * Returns the shaped output of @incremental.
+ *
+ * The returned buffer is owned by @incremental and must not be modified
+ * or destroyed.  It remains valid until the next append or until
+ * @incremental is destroyed.
+ *
+ * Return value: (transfer none): the shaped output buffer
+ *
+ * Since: REPLACEME
+ **/
+hb_buffer_t *
+hb_shape_incremental_get_buffer (hb_shape_incremental_t *incremental)
+{
+  return incremental ? incremental->glyphs : nullptr;
 }
 
 

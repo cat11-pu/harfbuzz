@@ -47,6 +47,7 @@ tests = [
   'test-subset-repacker.c',
   'test-set.c',
   'test-shape.c',
+  'test-shape-incremental.c',
   'test-shape-plan.c',
   'test-style.c',
   'test-subset.c',

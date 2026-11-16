@@ -53,6 +53,40 @@ hb_shape_full (hb_font_t          *font,
 	       unsigned int        num_features,
 	       const char * const *shaper_list);
 
+/**
+ * hb_shape_incremental_t:
+ *
+ * Data type for incrementally shaping text that is appended at the end
+ * of an existing input.
+ *
+ * An incremental shaping object owns the accumulated input text and its
+ * shaped output.  Appending text re-shapes only the cluster range that
+ * can be affected by the new suffix, and leaves the stable output prefix
+ * untouched.
+ *
+ * Since: REPLACEME
+ **/
+typedef struct hb_shape_incremental_t hb_shape_incremental_t;
+
+HB_EXTERN hb_shape_incremental_t *
+hb_shape_incremental_create (hb_font_t                      *font,
+			     const hb_segment_properties_t  *props,
+			     const hb_feature_t             *features,
+			     unsigned int                    num_features);
+
+HB_EXTERN void
+hb_shape_incremental_destroy (hb_shape_incremental_t *incremental);
+
+HB_EXTERN hb_bool_t
+hb_shape_incremental_append_utf8 (hb_shape_incremental_t *incremental,
+				  const char             *text,
+				  int                     text_length,
+				  unsigned int           *first_changed_cluster,
+				  unsigned int           *first_changed_glyph);
+
+HB_EXTERN hb_buffer_t *
+hb_shape_incremental_get_buffer (hb_shape_incremental_t *incremental);
+
 #ifdef HB_EXPERIMENTAL_API
 HB_EXTERN hb_bool_t
 hb_shape_justify (hb_font_t          *font,
